@@ -3,7 +3,7 @@ import pandas as pd
 import os
 import io
 
-# 파이썬 코드에 자동 경로 인식 추가 (환경 변수 및 로컬 연동 작업용)
+# 자동 경로 인식 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 # -------------------------------------------------------------------
@@ -21,17 +21,15 @@ def safe_date(val):
         return ""
 
 def to_excel_bytes(df):
-    """데이터프레임을 메모리 상의 엑셀 파일(Bytes)로 변환"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Sheet1')
     return output.getvalue()
 
 # -------------------------------------------------------------------
-# 2. 핵심 대조 로직 (매출/매입 통합 엔진)
+# 2. 핵심 대조 로직
 # -------------------------------------------------------------------
 def process_tax_invoices(hometax_file, erp_file, is_sales=True):
-    # 컬럼 설정
     if is_sales:
         ht_biz_col = '공급받는자사업자등록번호'
         ht_name_col = '상호.1' 
@@ -41,18 +39,15 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
         ht_name_col = '상호'
         prefix = "매입_"
 
-    # 데이터 로드
     df_ht = pd.read_excel(hometax_file, skiprows=5)
     df_erp = pd.read_excel(erp_file, skiprows=1)
     
     if ht_name_col not in df_ht.columns:
         ht_name_col = '상호'
 
-    # 정제 함수
     clean_biz = lambda x: str(x).replace("-", "").strip() if pd.notna(x) else ""
     clean_amt = lambda x: float(str(x).replace(",", "")) if pd.notna(x) and str(x).strip() != "" else 0
 
-    # 비교 전처리
     df_ht['비교_사업자번호'] = df_ht[ht_biz_col].apply(clean_biz)
     df_ht['비교_공급가액'] = df_ht['공급가액'].apply(clean_amt)
     df_ht['비교_세액'] = df_ht['세액'].apply(clean_amt)
@@ -158,7 +153,6 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
     # [Step 5] 종이세금계산서 의심
     df_paper = valid_erp[~valid_erp['Matched']].copy()
     
-    # 임시 컬럼 삭제 및 정리
     cols_to_drop = ['비교_사업자번호', '비교_공급가액', '비교_세액', '비교_작성일자', 'Matched']
     df_ht.drop(columns=cols_to_drop, inplace=True, errors='ignore')
     df_paper.drop(columns=cols_to_drop, inplace=True, errors='ignore')
@@ -169,7 +163,6 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
         cols = ['전산대조결과'] + cols
         df_ht = df_ht[cols]
 
-    # 결과물 생성 (Bytes)
     results = {
         'ht_result': to_excel_bytes(df_ht),
         'paper_result': to_excel_bytes(df_paper),
@@ -181,12 +174,17 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
     return results
 
 # -------------------------------------------------------------------
-# 3. Streamlit 웹앱 UI 구성
+# 3. Streamlit 웹앱 UI 구성 (세션 상태 적용)
 # -------------------------------------------------------------------
 st.set_page_config(page_title="세금계산서 대조 시스템", layout="wide")
 st.title("📑 세금계산서 전산/홈택스 대조 앱")
 
-# 탭 생성
+# 세션 상태(저장소) 초기화
+if 'sales_results' not in st.session_state:
+    st.session_state['sales_results'] = None
+if 'purc_results' not in st.session_state:
+    st.session_state['purc_results'] = None
+
 tab1, tab2 = st.tabs(["🔵 매출 세금계산서 대조", "🔴 매입 세금계산서 대조"])
 
 # --- 매출 탭 ---
@@ -198,24 +196,27 @@ with tab1:
     with col2:
         erp_file_sales = st.file_uploader("전산 엑셀 업로드 (매출)", type=['xls', 'xlsx'], key='erp_sales')
 
+    # 대조 버튼을 누르면 세션 상태에 결과 저장
     if ht_file_sales and erp_file_sales:
         if st.button("매출 데이터 대조 시작", key='btn_sales'):
             with st.spinner("분석 중입니다..."):
-                results = process_tax_invoices(ht_file_sales, erp_file_sales, is_sales=True)
-                
-            st.success("✨ 매출 데이터 분석이 완벽하게 끝났습니다!")
-            
-            st.download_button("📥 1. 홈택스 원본 대조결과 다운로드", data=results['ht_result'], 
-                               file_name=f"1_{results['prefix']}홈택스_대조완료.xlsx", mime="application/vnd.ms-excel")
-            st.download_button("📥 2. 종이세금계산서 의심목록 다운로드", data=results['paper_result'], 
-                               file_name=f"2_{results['prefix']}종이세금계산서_의심.xlsx", mime="application/vnd.ms-excel")
-            
-            if results['wrong_invoices']:
-                st.warning(f"🚨 오입력 의심 건수: {results['wrong_count']}건 발견됨")
-                st.download_button("📥 3. 틀린세금계산서 상세내역 다운로드", data=results['wrong_invoices'], 
-                                   file_name=f"3_{results['prefix']}틀린세금계산서_상세내역.xlsx", mime="application/vnd.ms-excel")
-            else:
-                st.info("👉 틀리게 입력된 세금계산서가 없습니다!")
+                st.session_state['sales_results'] = process_tax_invoices(ht_file_sales, erp_file_sales, is_sales=True)
+            st.success("✨ 매출 데이터 분석이 완료되었습니다!")
+
+    # 세션 상태에 결과가 존재하면 다운로드 버튼 활성화 유지
+    if st.session_state['sales_results'] is not None:
+        res = st.session_state['sales_results']
+        st.download_button("📥 1. 홈택스 원본 대조결과 다운로드", data=res['ht_result'], 
+                           file_name=f"1_{res['prefix']}홈택스_대조완료.xlsx", mime="application/vnd.ms-excel", key='dl_sales_1')
+        st.download_button("📥 2. 종이세금계산서 의심목록 다운로드", data=res['paper_result'], 
+                           file_name=f"2_{res['prefix']}종이세금계산서_의심.xlsx", mime="application/vnd.ms-excel", key='dl_sales_2')
+        
+        if res['wrong_invoices']:
+            st.warning(f"🚨 오입력 의심 건수: {res['wrong_count']}건 발견됨")
+            st.download_button("📥 3. 틀린세금계산서 상세내역 다운로드", data=res['wrong_invoices'], 
+                               file_name=f"3_{res['prefix']}틀린세금계산서_상세내역.xlsx", mime="application/vnd.ms-excel", key='dl_sales_3')
+        else:
+            st.info("👉 틀리게 입력된 세금계산서가 없습니다!")
 
 # --- 매입 탭 ---
 with tab2:
@@ -229,18 +230,19 @@ with tab2:
     if ht_file_purc and erp_file_purc:
         if st.button("매입 데이터 대조 시작", key='btn_purc'):
             with st.spinner("분석 중입니다..."):
-                results = process_tax_invoices(ht_file_purc, erp_file_purc, is_sales=False)
-                
-            st.success("✨ 매입 데이터 분석이 완벽하게 끝났습니다!")
-            
-            st.download_button("📥 1. 홈택스 원본 대조결과 다운로드", data=results['ht_result'], 
-                               file_name=f"1_{results['prefix']}홈택스_대조완료.xlsx", mime="application/vnd.ms-excel")
-            st.download_button("📥 2. 종이세금계산서 의심목록 다운로드", data=results['paper_result'], 
-                               file_name=f"2_{results['prefix']}종이세금계산서_의심.xlsx", mime="application/vnd.ms-excel")
-            
-            if results['wrong_invoices']:
-                st.warning(f"🚨 오입력 의심 건수: {results['wrong_count']}건 발견됨")
-                st.download_button("📥 3. 틀린세금계산서 상세내역 다운로드", data=results['wrong_invoices'], 
-                                   file_name=f"3_{results['prefix']}틀린세금계산서_상세내역.xlsx", mime="application/vnd.ms-excel")
-            else:
-                st.info("👉 틀리게 입력된 세금계산서가 없습니다!")
+                st.session_state['purc_results'] = process_tax_invoices(ht_file_purc, erp_file_purc, is_sales=False)
+            st.success("✨ 매입 데이터 분석이 완료되었습니다!")
+
+    if st.session_state['purc_results'] is not None:
+        res = st.session_state['purc_results']
+        st.download_button("📥 1. 홈택스 원본 대조결과 다운로드", data=res['ht_result'], 
+                           file_name=f"1_{res['prefix']}홈택스_대조완료.xlsx", mime="application/vnd.ms-excel", key='dl_purc_1')
+        st.download_button("📥 2. 종이세금계산서 의심목록 다운로드", data=res['paper_result'], 
+                           file_name=f"2_{res['prefix']}종이세금계산서_의심.xlsx", mime="application/vnd.ms-excel", key='dl_purc_2')
+        
+        if res['wrong_invoices']:
+            st.warning(f"🚨 오입력 의심 건수: {res['wrong_count']}건 발견됨")
+            st.download_button("📥 3. 틀린세금계산서 상세내역 다운로드", data=res['wrong_invoices'], 
+                               file_name=f"3_{res['prefix']}틀린세금계산서_상세내역.xlsx", mime="application/vnd.ms-excel", key='dl_purc_3')
+        else:
+            st.info("👉 틀리게 입력된 세금계산서가 없습니다!")
