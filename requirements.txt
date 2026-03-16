@@ -1,5 +1,5 @@
 streamlit
-yfinance
-finance-datareader
-requests
-beautifulsoup4
+pandas
+xlrd
+openpyxl
+xlsxwriter
