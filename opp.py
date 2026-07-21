@@ -21,12 +21,53 @@ def safe_date(val):
         return ""
 
 
+def clean_biz_no(x):
+    return str(x).replace("-", "").strip() if pd.notna(x) else ""
+
+
 def to_excel_workbook(sheets):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         for sheet_name, df in sheets.items():
             df.to_excel(writer, index=False, sheet_name=sheet_name)
     return output.getvalue()
+
+
+def check_business_number_mismatch(hometax_file, erp_file):
+    """홈택스 파일 상단의 사업자등록번호와 전산 파일의 사업장등록번호가
+    일치하는지 확인해서, 사업장이 잘못 짝지어진 파일 쌍을 사전에 잡아낸다.
+    확인이 불가능한 경우(양식이 다르거나 컬럼이 없는 경우)는 None을 반환해
+    기존 처리 흐름을 막지 않는다."""
+    try:
+        hometax_file.seek(0)
+        df_head = pd.read_excel(hometax_file, header=None, nrows=1)
+        hometax_file.seek(0)
+        if df_head.shape[1] < 2:
+            return None
+        ht_biz_no_raw = df_head.iat[0, 1]
+        ht_biz_no = clean_biz_no(ht_biz_no_raw)
+    except Exception:
+        return None
+
+    try:
+        erp_file.seek(0)
+        df_erp_head = pd.read_excel(erp_file, skiprows=1, usecols=['사업장등록번호'])
+        erp_file.seek(0)
+        erp_biz_nos_raw = df_erp_head['사업장등록번호'].dropna().unique().tolist()
+        erp_biz_nos_clean = {clean_biz_no(v) for v in erp_biz_nos_raw}
+        erp_biz_nos_clean.discard("")
+    except Exception:
+        return None
+
+    if not ht_biz_no or not erp_biz_nos_clean:
+        return None
+
+    if ht_biz_no not in erp_biz_nos_clean:
+        return {
+            'hometax_biz_no': ht_biz_no_raw,
+            'erp_biz_nos': erp_biz_nos_raw
+        }
+    return None
 
 
 # -------------------------------------------------------------------
@@ -212,6 +253,16 @@ def render_invoice_section(title, hometax_label, erp_label, button_label, sessio
         erp_file = st.file_uploader(erp_label, type=['xls', 'xlsx'], key=f'erp_{uploader_suffix}')
 
     if hometax_file and erp_file:
+        mismatch = check_business_number_mismatch(hometax_file, erp_file)
+        if mismatch:
+            erp_list = ', '.join(str(v) for v in mismatch['erp_biz_nos'])
+            st.error(
+                f"⚠️ 사업자번호 불일치 의심: 업로드하신 홈택스 파일은 "
+                f"**{mismatch['hometax_biz_no']}** 사업자 목록인데, "
+                f"전산 파일의 사업장등록번호({erp_list})와 일치하지 않습니다. "
+                f"서로 다른 사업장(서울/여주) 파일이 잘못 짝지어진 건 아닌지 확인해주세요."
+            )
+
         if st.button(button_label, key=f'btn_{uploader_suffix}'):
             with st.spinner("분석 중입니다..."):
                 st.session_state[session_key] = process_tax_invoices(hometax_file, erp_file, is_sales=is_sales)
