@@ -109,6 +109,8 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
                 '오류유형': '작성일자 오류',
                 '사업자번호': ht_row[ht_biz_col],
                 '상호': ht_row[ht_name_col],
+                '작성부서': valid_erp.at[erp_idx, '작성부서'] if '작성부서' in valid_erp.columns else '',
+                '작성사원': valid_erp.at[erp_idx, '작성사원'] if '작성사원' in valid_erp.columns else '',
                 '홈택스_작성일자': ht_row['작성일자'],
                 '전산_발생일자': valid_erp.at[erp_idx, '발생일자'],
                 '홈택스_공급가액': ht_row['공급가액'],
@@ -138,6 +140,8 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
                 '오류유형': '금액/세액 오류',
                 '사업자번호': ht_row[ht_biz_col],
                 '상호': ht_row[ht_name_col],
+                '작성부서': valid_erp.at[erp_idx, '작성부서'] if '작성부서' in valid_erp.columns else '',
+                '작성사원': valid_erp.at[erp_idx, '작성사원'] if '작성사원' in valid_erp.columns else '',
                 '홈택스_작성일자': ht_row['작성일자'],
                 '전산_발생일자': valid_erp.at[erp_idx, '발생일자'],
                 '홈택스_공급가액': ht_row['공급가액'],
@@ -153,8 +157,25 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
         if ht_row['전산대조결과'] == "":
             df_ht.at[ht_idx, '전산대조결과'] = "❌ 전산에 빠짐(누락)"
 
-    # [Step 5] 종이세금계산서 의심
+    # [Step 5] 종이세금계산서 의심 / 중복입력 의심 분류
     df_paper = valid_erp[~valid_erp['Matched']].copy()
+
+    # 홈택스 전자세금계산서에 존재하는 사업자등록번호 집합 (중복입력 의심 판정용)
+    ht_biz_numbers = set(df_ht.loc[df_ht['비교_사업자번호'] != '', '비교_사업자번호'])
+
+    def classify_unmatched(biz_no):
+        if biz_no in ht_biz_numbers:
+            return "🔁 중복의심(전산 중복입력)"
+        return "📄 종이세금계산서 의심"
+
+    if len(df_paper) > 0:
+        df_paper['분류결과'] = df_paper['비교_사업자번호'].apply(classify_unmatched)
+        cols = df_paper.columns.tolist()
+        cols.remove('분류결과')
+        cols = ['분류결과'] + cols
+        df_paper = df_paper[cols]
+    else:
+        df_paper['분류결과'] = []
 
     cols_to_drop = ['비교_사업자번호', '비교_공급가액', '비교_세액', '비교_작성일자', '비교_발생일자', 'Matched']
     df_ht.drop(columns=cols_to_drop, inplace=True, errors='ignore')
