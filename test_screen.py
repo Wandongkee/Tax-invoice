@@ -3,7 +3,7 @@ from test_offsets import ns, run_case, row
 
 class FakeStreamlit:
     def __init__(self,result):
-        self.session_state={'sales':result,'sales_files':(None,None)}
+        self.session_state={'sales':result,'sales_files':('month-policy-v1',None,None)}
         self.messages=[]
         self.metrics=[]
         self.downloads=[]

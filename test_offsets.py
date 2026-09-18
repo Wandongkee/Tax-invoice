@@ -82,8 +82,8 @@ class Tests(unittest.TestCase):
     def test_ordinary_amount_error(self):
         r,s=run_case([row()],[row(200,20)])
         self.assertEqual(r['wrong_count'],1)
-    def test_date_error(self):
-        r,s=run_case([row()],[row(d='2026-09-02')])
+    def test_cross_month_requires_review(self):
+        r,s=run_case([row()],[row(d='2026-10-02')])
         self.assertEqual(r['wrong_count'],1)
 
 if __name__ == '__main__':

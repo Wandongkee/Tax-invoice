@@ -176,7 +176,55 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
     erp_offsets, erp_offset_count = mark_offset_pairs(valid_erp, '비교_발생일자', '전산')
 
 
-    # 날짜 오류 후보와 금액 오류 후보를 함께 구성한다.
+    # 회사 내부 대조 기준: 같은 연월·사업자번호·개별 공급가액·세액이면
+    # 날짜 차이는 허용한다. 합계가 아닌 개별 건수만큼만 대조한다.
+    # 완전 일치와 상쇄를 먼저 처리했으므로 기존 연결을 바꾸지 않는다.
+    def month_key(row, date_col):
+        date = row[date_col]
+        if not date:
+            return None
+        return (row['비교_사업자번호'], date[:7],
+                row['비교_공급가액'], row['비교_세액'])
+
+    month_candidates = {}
+    for erp_idx, erp_row in valid_erp.loc[~valid_erp['Matched']].iterrows():
+        key = month_key(erp_row, '비교_발생일자')
+        if key is not None:
+            month_candidates.setdefault(key, []).append(erp_idx)
+
+    month_matches = []
+    for ht_idx, ht_row in df_ht.loc[~df_ht['Matched']].iterrows():
+        key = month_key(ht_row, '비교_작성일자')
+        indices = month_candidates.get(key, [])
+        if not indices:
+            continue
+        erp_idx = indices.pop(0)
+        erp_row = valid_erp.loc[erp_idx]
+        valid_erp.at[erp_idx, 'Matched'] = True
+        df_ht.at[ht_idx, 'Matched'] = True
+        df_ht.at[ht_idx, '전산대조결과'] = "정상(월 기준 일치)"
+        month_matches.append({
+            '대조기준': '회사 내부 기준: 동일 연월·사업자번호·개별 공급가액·세액',
+            '대조연월': key[1],
+            '사업자번호': ht_row[ht_biz_col],
+            '상호': ht_row[ht_name_col],
+            '홈택스_원본엑셀행': int(ht_idx) + 7,
+            '전산_원본엑셀행': int(erp_idx) + 3,
+            '홈택스_작성일자': ht_row['작성일자'],
+            '전산_발생일자': erp_row['발생일자'],
+            '홈택스_공급가액': ht_row['공급가액'],
+            '전산_공급가액': erp_row['공급가액'],
+            '홈택스_세액': ht_row['세액'],
+            '전산_세액': erp_row['세액'],
+            '홈택스_승인번호': ht_row.get('승인번호', ''),
+            '홈택스_품목명': ht_row.get('품목명', ''),
+            '전산_전표번호': erp_row.get('전표번호', ''),
+            '전산_적요': erp_row.get('적요', ''),
+            '참고': '동일 조건 묶음의 건수 대조이며 개별 증빙의 연결 확정은 아님'
+        })
+
+    # 월 차이 후보와 금액 오류 후보를 함께 구성한다.
+
     # 양쪽 모두 후보가 하나일 때만 연결하여 원본 행 순서에 따른 오연결을 막는다.
     candidates = {}
     reverse_candidates = {}
@@ -186,12 +234,12 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
             valid_erp['비교_공급가액'].eq(ht_row['비교_공급가액']) &
             valid_erp['비교_세액'].eq(ht_row['비교_세액'])
         )
-        same_date = (
-            valid_erp['비교_발생일자'].eq(ht_row['비교_작성일자']) &
+        same_month = (
+            valid_erp['비교_발생일자'].astype('string').str[:7].eq(ht_row['비교_작성일자'][:7]) &
             valid_erp['비교_발생일자'].ne('') &
             bool(ht_row['비교_작성일자'])
         )
-        indices = valid_erp.index[same_biz & (same_amount | same_date) & ~valid_erp['Matched']].tolist()
+        indices = valid_erp.index[same_biz & (same_amount | same_month) & ~valid_erp['Matched']].tolist()
         candidates[ht_idx] = indices
         for erp_idx in indices:
             reverse_candidates.setdefault(erp_idx, []).append(ht_idx)
@@ -228,13 +276,18 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
 
         erp_idx = indices[0]
         erp_row = valid_erp.loc[erp_idx]
-        error_type = ('작성일자 오류' if
-                      not ht_row['비교_작성일자'] or not erp_row['비교_발생일자'] or
-                      ht_row['비교_작성일자'] != erp_row['비교_발생일자']
-                      else '금액/세액 오류')
+        if not ht_row['비교_작성일자'] or not erp_row['비교_발생일자']:
+            error_type = '날짜 확인 필요'
+        elif ht_row['비교_작성일자'][:7] != erp_row['비교_발생일자'][:7]:
+            error_type = '귀속월 차이'
+        else:
+            error_type = '금액/세액 오류'
         valid_erp.at[erp_idx, 'Matched'] = True
         df_ht.at[ht_idx, 'Matched'] = True
-        df_ht.at[ht_idx, '전산대조결과'] = f"🚨 틀린세금계산서({error_type})"
+        if error_type == '금액/세액 오류':
+            df_ht.at[ht_idx, '전산대조결과'] = f"🚨 틀린세금계산서({error_type})"
+        else:
+            df_ht.at[ht_idx, '전산대조결과'] = f"⚠️ 확인 필요({error_type})"
         wrong_invoices.append({
             '오류유형': error_type,
             '사업자번호': ht_row[ht_biz_col],
@@ -259,9 +312,9 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
         return (row['비교_사업자번호'], row[date_col],
                 row['비교_공급가액'], row['비교_세액'])
 
-    exact_keys = {
-        invoice_key(row, '비교_작성일자')
-        for _, row in df_ht.loc[df_ht['전산대조결과'].eq('정상(일치)')].iterrows()
+    normal_month_keys = {
+        month_key(row, '비교_작성일자')
+        for _, row in df_ht.loc[df_ht['전산대조결과'].str.startswith('정상(')].iterrows()
         if row['비교_작성일자']
     }
     remaining_key_counts = {}
@@ -274,7 +327,9 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
         if row.name in review_erp:
             return "🔎 확인 필요(비교 후보 복수)"
         key = invoice_key(row, '비교_발생일자')
-        if row['비교_발생일자'] and (key in exact_keys or remaining_key_counts.get(key, 0) > 1):
+        if row['비교_발생일자'] and month_key(row, '비교_발생일자') in normal_month_keys:
+            return "🔁 중복의심(같은 월·금액의 정상 대조 건수 초과)"
+        if row['비교_발생일자'] and remaining_key_counts.get(key, 0) > 1:
             return "🔁 중복의심(사업자·날짜·공급가액·세액 동일)"
         if row['비교_사업자번호'] in ht_biz_numbers:
             return "🔎 확인 필요(홈택스 대응 자료 없음)"
@@ -287,9 +342,9 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
     statuses = df_ht['전산대조결과']
     erp_statuses = df_paper['분류결과'].astype('string')
     counts = {
-        '정상 일치': int(statuses.eq('정상(일치)').sum()),
+        '정상 일치': int(statuses.str.startswith('정상(').sum()),
         '전산 누락': int(statuses.str.contains('누락', regex=False).sum()),
-        '날짜·금액 오류': len(wrong_invoices),
+        '월·금액 확인': len(wrong_invoices),
         '상쇄 처리(쌍)': ht_offset_count + erp_offset_count,
         '홈택스 확인 필요': int(statuses.str.startswith('🔎').sum()),
         '전산 확인 필요': int(erp_statuses.str.startswith('🔎').sum()),
@@ -300,7 +355,12 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
         '홈택스 상쇄(행)': ht_offset_count * 2,
         '전산 상쇄(행)': erp_offset_count * 2,
         '홈택스 원본(행)': len(df_ht),
-        '전산 원본(행)': len(df_erp)
+        '전산 원본(행)': len(df_erp),
+        '정상 완전 일치': int(statuses.eq('정상(일치)').sum()),
+        '정상 월 기준 일치': len(month_matches),
+        '귀속월 차이': sum(x['오류유형'] == '귀속월 차이' for x in wrong_invoices),
+        '날짜 확인 필요': sum(x['오류유형'] == '날짜 확인 필요' for x in wrong_invoices),
+        '금액·세액 오류': sum(x['오류유형'] == '금액/세액 오류' for x in wrong_invoices)
     }
     # 비교 제외 자료도 다운로드 결과에 보존한다.
     df_excluded = df_erp.loc[df_erp['비교_사업자번호'].eq('')].copy()
@@ -326,7 +386,8 @@ def process_tax_invoices(hometax_file, erp_file, is_sales=True):
         '3_틀린세금계산서_상세': df_wrong,
         '4_상쇄처리_내역': df_offsets,
         '5_확인필요_후보': pd.DataFrame(review_rows),
-        '6_대조결과_요약': pd.DataFrame(list(counts.items()), columns=['구분', '건수'])
+        '6_대조결과_요약': pd.DataFrame(list(counts.items()), columns=['구분', '건수']),
+        '7_정상_월기준_내역': pd.DataFrame(month_matches)
     })
 
     results = {
@@ -345,7 +406,7 @@ def sync_uploaded_files(state, session_key, hometax_file, erp_file):
         if upload is None:
             return None
         return (upload.name, hashlib.sha256(upload.getvalue()).hexdigest())
-    identity = (fingerprint(hometax_file), fingerprint(erp_file))
+    identity = ('month-policy-v1', fingerprint(hometax_file), fingerprint(erp_file))
     identity_key = f"{session_key}_files"
     if state.get(identity_key) != identity:
         state[session_key] = None
@@ -388,11 +449,16 @@ def render_invoice_section(title, hometax_label, erp_label, button_label, sessio
             for column, label in zip(columns, labels[offset:offset + 4]):
                 column.metric(label, counts[label])
         st.caption(
+            f"정상 {counts['정상 일치']}건 — 완전 일치 {counts['정상 완전 일치']}건 / "
+            f"월 기준 일치 {counts['정상 월 기준 일치']}건. "
+            "회사 내부 대조 기준으로 같은 연월의 날짜 차이를 허용합니다. 원본 날짜는 보존됩니다."
+        )
+        st.caption(
             "정상·오류는 연결된 건수, 상쇄는 2행을 1쌍으로 계산합니다. "
             "확인 필요는 자료별 행 수이므로 홈택스·전산 건수를 합쳐 사건 수로 보지 마세요. "
-            "같은 사업자번호·날짜·금액·세액이라도 별도 거래일 수 있어 중복은 의심으로 표시합니다."
+            "같은 사업자번호·연월·금액·세액이라도 별도 거래일 수 있어 초과 건은 중복 의심으로 표시합니다."
         )
-        attention_labels = ['전산 누락', '날짜·금액 오류', '홈택스 확인 필요',
+        attention_labels = ['전산 누락', '월·금액 확인', '홈택스 확인 필요',
                             '전산 확인 필요', '전산 중복 의심', '종이계산서 의심',
                             '홈택스 비교 제외', '전산 비교 제외']
         if any(counts[label] for label in attention_labels):
